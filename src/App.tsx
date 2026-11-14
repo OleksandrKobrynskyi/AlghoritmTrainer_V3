@@ -5,6 +5,7 @@ import { SortingArena } from './features/sorting'
 import { ComplexitySimulator } from './features/complexity'
 import { RecursionTree } from './features/recursion'
 import { QuizTrainer } from './features/quiz'
+import { TeacherDashboard } from './features/teacher-dashboard'
 import { SeasonalCanvas, useSeasonManager } from './features/seasonal'
 import type { SeasonId, SeasonSetting } from './features/seasonal'
 
@@ -217,6 +218,12 @@ export default function App() {
                         >
                             {getSeasonButtonLabel(seasonSetting, resolvedSeason)}
                         </button>
+                        <button
+                         onClick={() => setActiveTab('teacher')}
+                         className={tabClassName(activeTab === 'teacher')}
+            >
+                Кабінет викладача
+            </button>
                     </div>
                 </header>
 
@@ -226,6 +233,7 @@ export default function App() {
                     {activeTab === 'complexity' && <ComplexitySimulator/>}
                     {activeTab === 'recursion' && <RecursionTree />}
                     {activeTab === 'quiz' && <QuizTrainer />}
+                    {activeTab === 'teacher' && <TeacherDashboard />}
                 </main>
             </div>
         </div>
