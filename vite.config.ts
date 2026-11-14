@@ -5,5 +5,5 @@ import { defineConfig } from 'vite'
 export default defineConfig({
   plugins: [react()],
   // GitHub Pages project site: https://<user>.github.io/<repo>/
-  base: '/AlghoritmTrainer_V2/',
+  base: '/AlghoritmTrainer_V3/',
 })
