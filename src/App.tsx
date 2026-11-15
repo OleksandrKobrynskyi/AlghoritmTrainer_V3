@@ -130,7 +130,7 @@ export default function App() {
      * unmounted, so no submission state leaks between sessions.
      */
     const [submissionDraft, setSubmissionDraft] =
-        useState<QuizResultDraft | null>(null)
+        useState<any | null>(null)
     const {
         activeSeason: resolvedSeason,
         seasonSetting,
