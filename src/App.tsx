@@ -5,7 +5,9 @@ import { SortingArena } from './features/sorting'
 import { ComplexitySimulator } from './features/complexity'
 import { RecursionTree } from './features/recursion'
 import { QuizTrainer } from './features/quiz'
+import type { QuizResultDraft } from './features/quiz'
 import { TeacherDashboard } from './features/teacher-dashboard'
+import { ResultSubmissionModal } from './features/result-submission'
 import { SeasonalCanvas, useSeasonManager } from './features/seasonal'
 import type { SeasonId, SeasonSetting } from './features/seasonal'
 
@@ -124,6 +126,12 @@ function getInitialTheme(): ThemeMode {
 export default function App() {
     const [activeTab, setActiveTab] = useState('sorting')
     const [theme, setTheme] = useState<ThemeMode>(getInitialTheme)
+    /**
+     * Finished quiz run waiting to be published. `null` keeps the modal
+     * unmounted, so no submission state leaks between sessions.
+     */
+    const [submissionDraft, setSubmissionDraft] =
+        useState<QuizResultDraft | null>(null)
     const {
         activeSeason: resolvedSeason,
         seasonSetting,
@@ -232,10 +240,29 @@ export default function App() {
                     {activeTab === 'sorting' && <SortingArena/>}
                     {activeTab === 'complexity' && <ComplexitySimulator/>}
                     {activeTab === 'recursion' && <RecursionTree />}
-                    {activeTab === 'quiz' && <QuizTrainer />}
+                    {activeTab === 'quiz' && (
+                        <QuizTrainer
+                            onFinish={(draft) => setSubmissionDraft(draft)}
+                        />
+                    )}
                     {activeTab === 'teacher' && <TeacherDashboard />}
                 </main>
             </div>
+
+            {/*
+             * TODO(TeamLead): ResultSubmissionModal mount
+             * Composition point for the quiz -> Lambda journal flow. Mounted
+             * only after a finished run, so sorting/complexity/recursion and
+             * the teacher dashboard stay untouched.
+             */}
+            {submissionDraft ? (
+                <ResultSubmissionModal
+                    testName={submissionDraft.testName}
+                    score={submissionDraft.score}
+                    answers={submissionDraft.answers}
+                    onClose={() => setSubmissionDraft(null)}
+                />
+            ) : null}
         </div>
     )
 }
