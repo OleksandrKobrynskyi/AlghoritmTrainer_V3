@@ -240,7 +240,6 @@ export default function App() {
                     {activeTab === 'complexity' && <ComplexitySimulator/>}
                     {activeTab === 'recursion' && <RecursionTree />}
                     {activeTab === 'quiz' && (
-                        /* @ts-ignore - тимчасовий ігнор для деплою */
                         <QuizTrainer onFinish={(draft: any) => setSubmissionDraft(draft)} />
                     )}
                     {activeTab === 'teacher' && <TeacherDashboard />}

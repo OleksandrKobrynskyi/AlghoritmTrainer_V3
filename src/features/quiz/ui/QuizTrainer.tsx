@@ -1,8 +1,15 @@
-import type { SortingStatePayload } from '../model/types'
+import { useEffect, useRef } from 'react'
+import type { QuizMode, SortingStatePayload } from '../model/types'
 import { useQuizEngine } from '../lib/useQuizEngine'
 import { QuizGame } from './QuizGame'
 import { QuizLobby } from './QuizLobby'
 import { QuizResults } from './QuizResults'
+
+const TEST_NAMES: Record<QuizMode, string> = {
+  mixed: 'Мікс',
+  sorting: 'Наступний крок',
+  theory: 'Банк тестів',
+}
 
 interface QuizTrainerProps {
   /**
@@ -10,10 +17,37 @@ interface QuizTrainerProps {
    * module can be developed and demoed before the sorting module is ready.
    */
   sortingPayloads?: SortingStatePayload[]
+  onFinish?: (draft: { testName: string; score: number; answers: string[] }) => void;
 }
 
-export function QuizTrainer({ sortingPayloads }: QuizTrainerProps) {
+export function QuizTrainer({ sortingPayloads, onFinish }: QuizTrainerProps) {
   const engine = useQuizEngine({ payloads: sortingPayloads })
+  const finishedAtRef = useRef<number | null>(engine.finishedAt)
+
+  useEffect(() => {
+    if (engine.status !== 'finished' || engine.finishedAt === null) {
+      return
+    }
+
+    if (finishedAtRef.current === engine.finishedAt) {
+      return
+    }
+
+    finishedAtRef.current = engine.finishedAt
+
+    onFinish?.({
+      testName: TEST_NAMES[engine.mode],
+      score: engine.score,
+      answers: engine.answers.map((answer) => answer.selectedOptionId),
+    })
+  }, [
+    engine.status,
+    engine.finishedAt,
+    engine.mode,
+    engine.score,
+    engine.answers,
+    onFinish,
+  ])
 
   if (engine.status === 'playing' && engine.currentQuestion) {
     return (
