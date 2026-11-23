@@ -58,6 +58,7 @@ const TREE_BRANCH_SURFACES = 4
 
 const TAU = Math.PI * 2
 const RESCAN_DEBOUNCE_MS = 200
+const RESIZE_DEBOUNCE_MS = 120
 
 const PETAL_COLORS = ['#fbcfe8', '#f9a8d4', '#fde68a'] as const
 const FIREFLY_COLORS = ['#bef264', '#facc15'] as const
@@ -242,6 +243,8 @@ class SeasonalEngine {
   private lastTime = 0
   private elapsed = 0
   private rescanTimer = 0
+  private resizeTimer = 0
+  private resizeRafId = 0
   private headerBottomY = 0
 
   private targets: SnowTarget[] = []
@@ -260,6 +263,7 @@ class SeasonalEngine {
    * copied into the main canvas with a single `drawImage` per frame.
    */
   private treeCanvas: HTMLCanvasElement | null = null
+  private treeLayerActive = false
   private treeAlpha = 0
   private treeCanopyPoints: CanopyPoint[] = []
 
@@ -318,12 +322,24 @@ class SeasonalEngine {
       this.rescanTimer = 0
     }
 
+    if (this.resizeTimer) {
+      window.clearTimeout(this.resizeTimer)
+      this.resizeTimer = 0
+    }
+
+    if (this.resizeRafId) {
+      window.cancelAnimationFrame(this.resizeRafId)
+      this.resizeRafId = 0
+    }
+
     window.removeEventListener('mousemove', this.onMouseMove)
     window.removeEventListener('mousedown', this.onMouseDown)
     window.removeEventListener('resize', this.onResize)
     window.removeEventListener('scroll', this.onScroll, true)
     document.removeEventListener('visibilitychange', this.onVisibilityChange)
 
+    this.treeCanvas = null
+    this.treeLayerActive = false
     this.clear()
   }
 
@@ -373,9 +389,55 @@ class SeasonalEngine {
     }
   }
 
+  /**
+   * `resize` fires once per frame while the user drags a window edge. Doing the
+   * full backing-store reallocation and tree repaint on every event caused
+   * CPU/GPU and GC spikes, so work is debounced and then coalesced into a
+   * single animation frame.
+   */
   private readonly onResize = (): void => {
-    this.resize()
-    this.scheduleRescan()
+    if (this.destroyed) return
+
+    if (this.resizeTimer) window.clearTimeout(this.resizeTimer)
+    this.resizeTimer = window.setTimeout(() => {
+      this.resizeTimer = 0
+
+      if (this.resizeRafId) window.cancelAnimationFrame(this.resizeRafId)
+      this.resizeRafId = window.requestAnimationFrame(() => {
+        this.resizeRafId = 0
+        if (this.destroyed) return
+
+        // Ignore events that did not change the device-pixel viewport (for
+        // example, a resize fired while the size stayed identical).
+        if (this.hasViewportChanged()) {
+          this.resize()
+        }
+
+        this.scheduleRescan()
+      })
+    }, RESIZE_DEBOUNCE_MS)
+  }
+
+  private hasViewportChanged(): boolean {
+    const width = this.viewportWidth()
+    const height = this.viewportHeight()
+    const dpr = Math.min(2, window.devicePixelRatio || 1)
+
+    return width !== this.width || height !== this.height || dpr !== this.dpr
+  }
+
+  /**
+   * The canvas is stretched over the viewport with `h-full w-full`, so the
+   * drawing space must be the layout viewport — not `innerWidth`/`innerHeight`,
+   * which include the classic scrollbar and would make every cached
+   * `getBoundingClientRect()` target land a few pixels off.
+   */
+  private viewportWidth(): number {
+    return Math.max(1, document.documentElement.clientWidth || window.innerWidth)
+  }
+
+  private viewportHeight(): number {
+    return Math.max(1, document.documentElement.clientHeight || window.innerHeight)
   }
 
   private readonly onScroll = (): void => {
@@ -391,8 +453,8 @@ class SeasonalEngine {
   }
 
   private resize(): void {
-    this.width = Math.max(1, window.innerWidth)
-    this.height = Math.max(1, window.innerHeight)
+    this.width = this.viewportWidth()
+    this.height = this.viewportHeight()
     this.dpr = Math.min(2, window.devicePixelRatio || 1)
 
     this.canvas.width = Math.round(this.width * this.dpr)
@@ -1299,27 +1361,22 @@ class SeasonalEngine {
       ) * TREE_MAX_ALPHA
 
     if (this.season === 'off' || this.treeAlpha <= 0) {
-      this.treeCanvas = null
+      this.treeLayerActive = false
       this.treeCanopyPoints = []
       this.treeSurfaces = []
       this.reconcileVirtualTargets()
       return
     }
 
-    const offscreen = document.createElement('canvas')
-    offscreen.width = Math.max(1, Math.round(this.width * this.dpr))
-    offscreen.height = Math.max(1, Math.round(this.height * this.dpr))
-
-    const ctx = offscreen.getContext('2d')
+    const ctx = this.ensureTreeCanvas()
     if (!ctx) {
-      this.treeCanvas = null
+      this.treeLayerActive = false
       this.treeCanopyPoints = []
       this.treeSurfaces = []
       this.reconcileVirtualTargets()
       return
     }
 
-    ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0)
     ctx.clearRect(0, 0, this.width, this.height)
     ctx.globalAlpha = this.treeAlpha
 
@@ -1357,9 +1414,34 @@ class SeasonalEngine {
       }
     }
 
-    this.treeCanvas = offscreen
+    this.treeLayerActive = true
     this.treeSurfaces = nextSurfaces
     this.reconcileVirtualTargets()
+  }
+
+  /**
+   * Lazily creates the offscreen tree buffer once per engine instance and
+   * resizes it in place. Assigning `width`/`height` reallocates the backing
+   * store, so it only happens when the device-pixel size actually changed.
+   */
+  private ensureTreeCanvas(): CanvasRenderingContext2D | null {
+    if (!this.treeCanvas) {
+      this.treeCanvas = document.createElement('canvas')
+    }
+
+    const canvas = this.treeCanvas
+    const deviceWidth = Math.max(1, Math.round(this.width * this.dpr))
+    const deviceHeight = Math.max(1, Math.round(this.height * this.dpr))
+
+    if (canvas.width !== deviceWidth) canvas.width = deviceWidth
+    if (canvas.height !== deviceHeight) canvas.height = deviceHeight
+
+    const ctx = canvas.getContext('2d')
+    if (!ctx) return null
+
+    // A resized canvas resets its transform, so always (re)apply the DPR scale.
+    ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0)
+    return ctx
   }
 
   private reconcileVirtualTargets(): void {
@@ -1599,7 +1681,7 @@ class SeasonalEngine {
   /** Single cached-buffer blit — no tree paths are built per frame. */
   private drawTreeLayer(): void {
     const cached = this.treeCanvas
-    if (!cached) return
+    if (!cached || !this.treeLayerActive) return
 
     const ctx = this.ctx
     ctx.save()
@@ -2137,7 +2219,7 @@ export function SeasonalCanvas({
     <canvas
       ref={canvasRef}
       aria-hidden="true"
-      className="fixed inset-0 pointer-events-none z-30"
+      className="fixed inset-0 h-full w-full pointer-events-none z-30"
     />
   )
 }
