@@ -58,18 +58,23 @@ function toRecord(value: unknown): Record<string, unknown> {
         : {}
 }
 
-function toFiniteNumber(value: unknown): number {
-    if (typeof value === 'number' && Number.isFinite(value)) {
-        return value
+/**
+ * `null` means "the backend did not report a score". Missing, `null`,
+ * `undefined` and non-numeric values must never collapse into a real `0`:
+ * an absent grade is not a failed attempt. A genuine `0` is preserved.
+ */
+function toNullableScore(value: unknown): number | null {
+    if (typeof value === 'number') {
+        return Number.isFinite(value) ? value : null
     }
 
     if (typeof value === 'string' && value.trim() !== '') {
         const parsed = Number(value)
 
-        return Number.isFinite(parsed) ? parsed : 0
+        return Number.isFinite(parsed) ? parsed : null
     }
 
-    return 0
+    return null
 }
 
 function toAnswers(value: unknown): string[] {
@@ -92,7 +97,7 @@ function toStudentResultItem(rawItem: unknown): StudentResultItem {
         studentName:
             typeof record.studentName === 'string' ? record.studentName : '—',
         testName: typeof record.testName === 'string' ? record.testName : '—',
-        score: toFiniteNumber(record.score),
+        score: toNullableScore(record.score),
         answers: toAnswers(record.answers),
         createdAt: typeof record.createdAt === 'string' ? record.createdAt : '',
     }
@@ -118,14 +123,76 @@ function parseResponse(payload: unknown): GetResultsResponse {
     }
 }
 
+function isAbortError(error: unknown): boolean {
+    return (
+        typeof error === 'object' &&
+        error !== null &&
+        'name' in error &&
+        (error as { name?: unknown }).name === 'AbortError'
+    )
+}
+
+/**
+ * `AbortController.abort()` is sticky, so a caller signal that already fired
+ * must forward immediately instead of waiting for a future `abort` event.
+ */
+function linkAbortSignal(
+    controller: AbortController,
+    externalSignal?: AbortSignal,
+): () => void {
+    if (!externalSignal) {
+        return () => {}
+    }
+
+    if (externalSignal.aborted) {
+        controller.abort()
+
+        return () => {}
+    }
+
+    const forwardAbort = () => controller.abort()
+    externalSignal.addEventListener('abort', forwardAbort, { once: true })
+
+    return () => externalSignal.removeEventListener('abort', forwardAbort)
+}
+
+/**
+ * Converts low-level failures into UI-ready errors.
+ *
+ * A genuine cancellation (unmount, superseded request) keeps the `AbortError`
+ * identity so callers can ignore it; only the internal timeout is translated
+ * into a human-readable message.
+ */
+function toTransportError(error: unknown, timedOut: boolean): Error {
+    if (isAbortError(error)) {
+        if (!timedOut) {
+            return error as Error
+        }
+
+        return new Error(
+            `Сервер не відповів за ${REQUEST_TIMEOUT_MS / 1000} с. Перевірте з'єднання та спробуйте ще раз.`,
+        )
+    }
+
+    return new Error(
+        "Не вдалося з'єднатися з сервером. Перевірте інтернет-з'єднання.",
+    )
+}
+
 /**
  * Reads a page of student submissions.
  *
+ * The 20 s timeout covers the whole exchange — request *and* body parsing — so
+ * a stalled response body cannot leave the caller loading forever.
+ *
+ * @param externalSignal Optional caller cancellation (unmount, newer request).
  * @throws Error with message `UNAUTHORIZED` on HTTP 401, a Ukrainian
- *   human-readable message for every other failure (HTTP or network).
+ *   human-readable message for every other failure (HTTP, network, timeout),
+ *   or the original `AbortError` when the caller aborted the request.
  */
 export async function fetchStudentResults(
     params: FetchResultsParams,
+    externalSignal?: AbortSignal,
 ): Promise<GetResultsResponse> {
     const searchParams = new URLSearchParams()
     searchParams.set('limit', String(clampLimit(params.limit)))
@@ -141,49 +208,56 @@ export async function fetchStudentResults(
     }
 
     const controller = new AbortController()
-    const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS)
+    let timedOut = false
+    const timeoutId = setTimeout(() => {
+        timedOut = true
+        controller.abort()
+    }, REQUEST_TIMEOUT_MS)
+    const detachExternalSignal = linkAbortSignal(controller, externalSignal)
 
-    let response: Response
     try {
-        response = await fetch(`${baseUrl}/results?${searchParams.toString()}`, {
-            method: 'GET',
-            headers: {
-                'Content-Type': 'application/json',
-                'X-Admin-Login': params.credentials.login,
-                'X-Admin-Password': params.credentials.password,
-            },
-            signal: controller.signal,
-        })
-    } catch (error) {
-        if (error instanceof Error && error.name === 'AbortError') {
-            throw new Error(
-                `Сервер не відповів за ${REQUEST_TIMEOUT_MS / 1000} с. Перевірте з'єднання та спробуйте ще раз.`,
+        let response: Response
+
+        try {
+            response = await fetch(
+                `${baseUrl}/results?${searchParams.toString()}`,
+                {
+                    method: 'GET',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-Admin-Login': params.credentials.login,
+                        'X-Admin-Password': params.credentials.password,
+                    },
+                    signal: controller.signal,
+                },
             )
+        } catch (error) {
+            throw toTransportError(error, timedOut)
         }
 
-        throw new Error(
-            "Не вдалося з'єднатися з сервером. Перевірте інтернет-з'єднання.",
-        )
+        if (response.status === 401) {
+            throw new Error(UNAUTHORIZED_ERROR)
+        }
+
+        if (!response.ok) {
+            throw new Error(buildHttpErrorMessage(response.status))
+        }
+
+        try {
+            return parseResponse(await response.json())
+        } catch (error) {
+            if (isAbortError(error)) {
+                throw toTransportError(error, timedOut)
+            }
+
+            throw new Error(
+                'Сервер повернув некоректну відповідь: не вдалося прочитати JSON.',
+            )
+        }
     } finally {
+        // Cleared only after the body is parsed, so `response.json()` shares the
+        // same 20 s budget as the request itself.
         clearTimeout(timeoutId)
+        detachExternalSignal()
     }
-
-    if (response.status === 401) {
-        throw new Error(UNAUTHORIZED_ERROR)
-    }
-
-    if (!response.ok) {
-        throw new Error(buildHttpErrorMessage(response.status))
-    }
-
-    let payload: unknown
-    try {
-        payload = await response.json()
-    } catch {
-        throw new Error(
-            'Сервер повернув некоректну відповідь: не вдалося прочитати JSON.',
-        )
-    }
-
-    return parseResponse(payload)
 }

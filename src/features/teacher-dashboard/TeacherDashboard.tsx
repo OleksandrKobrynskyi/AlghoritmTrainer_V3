@@ -138,28 +138,61 @@ function describeError(error: unknown): string {
     return 'Не вдалося завантажити результати. Спробуйте ще раз.'
 }
 
+function isAbortError(error: unknown): boolean {
+    return (
+        typeof error === 'object' &&
+        error !== null &&
+        'name' in error &&
+        (error as { name?: unknown }).name === 'AbortError'
+    )
+}
+
+/**
+ * Merges a freshly loaded page into the accumulated journal.
+ *
+ * Only records with a real, non-empty `submissionId` are deduplicated. Legacy
+ * records without one are always appended: two students can submit within the
+ * same second, so `createdAt` is not a safe identity key.
+ */
 function mergeResults(
     current: StudentResultItem[],
     incoming: StudentResultItem[],
 ): StudentResultItem[] {
-    const seen = new Set(current.map((item) => item.submissionId || item.createdAt))
+    const knownSubmissionIds = new Set<string>()
+
+    for (const item of current) {
+        const submissionId = item.submissionId.trim()
+
+        if (submissionId) {
+            knownSubmissionIds.add(submissionId)
+        }
+    }
+
     const merged = [...current]
 
     for (const item of incoming) {
-        const key = item.submissionId || item.createdAt
+        const submissionId = item.submissionId.trim()
 
-        if (seen.has(key)) {
-            continue
+        if (submissionId) {
+            if (knownSubmissionIds.has(submissionId)) {
+                continue
+            }
+
+            knownSubmissionIds.add(submissionId)
         }
 
-        seen.add(key)
         merged.push(item)
     }
 
     return merged
 }
 
-function scoreToneClass(score: number): string {
+function scoreToneClass(score: number | null): string {
+    // Neutral styling: a missing score is unknown, not a failed attempt.
+    if (score === null) {
+        return 'border-yellow-500/30 bg-zinc-950 text-yellow-500/70 dark:border-neutral-700 dark:bg-neutral-950 dark:text-neutral-400 apple:border-white/20 apple:bg-white/10 apple:text-white/70'
+    }
+
     if (score >= 80) {
         return 'border-emerald-500/50 bg-emerald-500/10 text-emerald-400 dark:border-emerald-400/30 dark:text-emerald-300 apple:border-emerald-300/40 apple:bg-emerald-400/20 apple:text-emerald-100'
     }
@@ -292,9 +325,51 @@ function ResultsPanel({
     const [error, setError] = useState<string | null>(null)
     const initialLoadRef = useRef(false)
     const tableScrollRef = useRef<HTMLDivElement | null>(null)
+    /** Monotonic id: only the newest request may touch state. */
+    const requestIdRef = useRef(0)
+    /** Request currently in flight, aborted when superseded or on unmount. */
+    const activeControllerRef = useRef<AbortController | null>(null)
+    const isMountedRef = useRef(true)
+    /** Latest committed rows, used for pagination-progress accounting. */
+    const itemsRef = useRef<StudentResultItem[]>([])
+
+    useEffect(() => {
+        isMountedRef.current = true
+
+        return () => {
+            isMountedRef.current = false
+            // StrictMode remounts in dev after this cleanup, so let the initial
+            // page load run again once the aborted request is discarded.
+            initialLoadRef.current = false
+            activeControllerRef.current?.abort()
+            activeControllerRef.current = null
+        }
+    }, [])
+
+    useEffect(() => {
+        itemsRef.current = items
+    }, [items])
+
+    const beginRequest = useCallback(() => {
+        activeControllerRef.current?.abort()
+
+        const controller = new AbortController()
+        activeControllerRef.current = controller
+        requestIdRef.current += 1
+
+        return { requestId: requestIdRef.current, controller }
+    }, [])
 
     const handleFailure = useCallback(
-        (caught: unknown) => {
+        (caught: unknown, requestId: number) => {
+            if (
+                !isMountedRef.current ||
+                requestId !== requestIdRef.current ||
+                isAbortError(caught)
+            ) {
+                return
+            }
+
             if (caught instanceof Error && caught.message === UNAUTHORIZED_ERROR) {
                 onSessionExpired(UNAUTHORIZED_MESSAGE)
                 return
@@ -307,15 +382,22 @@ function ResultsPanel({
 
     const loadFirstPage = useCallback(
         async (testName: string, limit: number) => {
+            const { requestId, controller } = beginRequest()
+
             setIsLoading(true)
+            // A fresh first page supersedes any in-flight "load next page".
+            setIsLoadingMore(false)
             setError(null)
 
             try {
-                const response = await fetchStudentResults({
-                    credentials,
-                    limit,
-                    testName,
-                })
+                const response = await fetchStudentResults(
+                    { credentials, limit, testName },
+                    controller.signal,
+                )
+
+                if (!isMountedRef.current || requestId !== requestIdRef.current) {
+                    return
+                }
 
                 setItems(response.items)
                 setNextKey(response.nextKey)
@@ -323,12 +405,20 @@ function ResultsPanel({
                 setAppliedTestName(testName)
                 tableScrollRef.current?.scrollTo({ top: 0 })
             } catch (caught) {
-                handleFailure(caught)
+                handleFailure(caught, requestId)
             } finally {
-                setIsLoading(false)
+                // An aborted/stale request must not turn off the spinner of the
+                // request that replaced it.
+                if (isMountedRef.current && requestId === requestIdRef.current) {
+                    setIsLoading(false)
+
+                    if (activeControllerRef.current === controller) {
+                        activeControllerRef.current = null
+                    }
+                }
             }
         },
-        [credentials, handleFailure],
+        [beginRequest, credentials, handleFailure],
     )
 
     useEffect(() => {
@@ -352,7 +442,9 @@ function ResultsPanel({
     const handlePageSizeChange = (event: ChangeEvent<HTMLSelectElement>) => {
         const nextPageSize = Number(event.target.value)
         setPageSize(nextPageSize)
-        void loadFirstPage(testNameInput.trim(), nextPageSize)
+        // Preserve the filter that is actually applied — never the unsubmitted
+        // text sitting in the input.
+        void loadFirstPage(appliedTestName, nextPageSize)
     }
 
     const handleShowMore = () => {
@@ -360,31 +452,59 @@ function ResultsPanel({
     }
 
     const handleLoadNextPage = async () => {
-        if (!nextKey || isLoadingMore) {
+        if (!nextKey || isLoading || isLoadingMore) {
             return
         }
+
+        const requestedLastKey = nextKey
+        const { requestId, controller } = beginRequest()
 
         setIsLoadingMore(true)
         setError(null)
 
         try {
-            const response = await fetchStudentResults({
-                credentials,
-                limit: pageSize,
-                lastKey: nextKey,
-                testName: appliedTestName,
-            })
-            const merged = mergeResults(items, response.items)
-
-            setItems(merged)
-            setVisibleCount((current) =>
-                Math.min(merged.length, current + (merged.length - items.length)),
+            const response = await fetchStudentResults(
+                {
+                    credentials,
+                    limit: pageSize,
+                    lastKey: requestedLastKey,
+                    testName: appliedTestName,
+                },
+                controller.signal,
             )
-            setNextKey(response.nextKey)
+
+            if (!isMountedRef.current || requestId !== requestIdRef.current) {
+                return
+            }
+
+            // Requests are serialized, so the ref holds the latest committed
+            // rows; merging functionally keeps React from seeing a stale array.
+            const snapshot = itemsRef.current
+            const addedCount =
+                mergeResults(snapshot, response.items).length - snapshot.length
+
+            setItems((previous) => mergeResults(previous, response.items))
+            setVisibleCount((current) => current + addedCount)
+
+            // Stop pagination when the cursor loops, the page is empty or the
+            // page only repeats records we already have.
+            const paginationStalled =
+                response.items.length === 0 ||
+                addedCount === 0 ||
+                !response.nextKey ||
+                response.nextKey === requestedLastKey
+
+            setNextKey(paginationStalled ? null : response.nextKey)
         } catch (caught) {
-            handleFailure(caught)
+            handleFailure(caught, requestId)
         } finally {
-            setIsLoadingMore(false)
+            if (isMountedRef.current && requestId === requestIdRef.current) {
+                setIsLoadingMore(false)
+
+                if (activeControllerRef.current === controller) {
+                    activeControllerRef.current = null
+                }
+            }
         }
     }
 
@@ -548,8 +668,15 @@ function ResultsPanel({
                                     <td className="px-4 py-3">
                                         <span
                                             className={`inline-flex min-w-[3.5rem] items-center justify-center rounded-none border px-2 py-1 font-mono text-xs font-semibold dark:rounded-full dark:font-sans apple:rounded-full apple:border apple:backdrop-blur-2xl ${scoreToneClass(item.score)}`}
+                                            title={
+                                                item.score === null
+                                                    ? 'Бал не вказано'
+                                                    : undefined
+                                            }
                                         >
-                                            {numberFormatter.format(item.score)}
+                                            {item.score === null
+                                                ? '—'
+                                                : numberFormatter.format(item.score)}
                                         </span>
                                     </td>
                                     <td className="px-4 py-3">

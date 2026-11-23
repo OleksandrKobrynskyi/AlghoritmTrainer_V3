@@ -9,7 +9,11 @@ export interface StudentResultItem {
     submissionId: string
     studentName: string
     testName: string
-    score: number
+    /**
+     * `null` when the backend did not report a score (missing, `null` or
+     * non-numeric). An absent grade must stay distinguishable from a real `0`.
+     */
+    score: number | null
     answers: string[]
     createdAt: string
 }
