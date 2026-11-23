@@ -21,6 +21,8 @@ const REQUEST_TIMEOUT_MS = 15000
 
 const INVALID_NAME_ERROR =
   'Перевірте правильність введеного імені (від 2 до 100 символів)'
+const VALIDATION_ERROR =
+  'Сервер відхилив результат: перевірте введені дані та спробуйте ще раз'
 const RATE_LIMIT_ERROR =
   'Забагато запитів. Зачекайте кілька секунд і спробуйте знову'
 const NETWORK_ERROR =
@@ -36,9 +38,48 @@ function isAbortError(error: unknown): boolean {
   return error instanceof Error && error.name === 'AbortError'
 }
 
-function buildHttpErrorMessage(status: number): string {
+/**
+ * Extracts a human-readable message from a backend error body.
+ *
+ * The API may answer with either `{ "error": "..." }` or
+ * `{ "message": "..." }`; anything else falls back to a generic message so a
+ * malformed body can never leak `[object Object]` into the modal.
+ */
+function extractBackendMessage(payload: unknown): string | null {
+  if (typeof payload !== 'object' || payload === null) {
+    return null
+  }
+
+  const record = payload as Record<string, unknown>
+
+  for (const key of ['error', 'message'] as const) {
+    const value = record[key]
+    if (typeof value === 'string' && value.trim() !== '') {
+      return value.trim()
+    }
+  }
+
+  return null
+}
+
+/**
+ * HTTP 400 carries the backend's own validation message (invalid score,
+ * payload size, answers format, …), so the body must be read before choosing
+ * a fallback. `INVALID_NAME_ERROR` is intentionally not used here: it belongs
+ * to the client-side name check in `ResultSubmissionModal`.
+ */
+async function buildHttpErrorMessage(response: Response): Promise<string> {
+  const { status } = response
+
   if (status === 400) {
-    return INVALID_NAME_ERROR
+    let payload: unknown = null
+    try {
+      payload = await response.json()
+    } catch {
+      payload = null
+    }
+
+    return extractBackendMessage(payload) ?? VALIDATION_ERROR
   }
 
   if (status === 429) {
@@ -103,7 +144,7 @@ export async function submitStudentResult(
     })
 
     if (!response.ok) {
-      return errorResponse(buildHttpErrorMessage(response.status))
+      return errorResponse(await buildHttpErrorMessage(response))
     }
 
     let raw: unknown = null

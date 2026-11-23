@@ -459,9 +459,43 @@ export function* quickSort(input: readonly number[]): SortGenerator {
 /* -------------------------------------------------------------------------- */
 
 /**
- * Counting sort expects non-negative integers. The arena generates values in
- * the `[5, 100]` range, so the counting table never grows unexpectedly.
+ * Counting sort works on integers of any sign. Values are offset by the
+ * minimum (`value - min`) so negative numbers sort correctly, and the table
+ * size is `max - min + 1`. The arena generates values in the `[5, 100]` range,
+ * but callers may pass arbitrary integers, so the range is validated first.
  */
+const COUNTING_SORT_MAX_RANGE = 100_000
+
+function assertCountingSortInput(array: readonly number[]): {
+  minimum: number
+  maximum: number
+} {
+  let minimum = array[0]
+  let maximum = array[0]
+
+  for (let index = 0; index < array.length; index += 1) {
+    const value = array[index]
+
+    if (!Number.isFinite(value) || !Number.isInteger(value)) {
+      throw new Error(
+        `Сортування підрахунком приймає лише цілі числа: отримано ${String(value)}`,
+      )
+    }
+
+    if (value < minimum) minimum = value
+    if (value > maximum) maximum = value
+  }
+
+  const range = maximum - minimum + 1
+  if (range > COUNTING_SORT_MAX_RANGE) {
+    throw new Error(
+      `Діапазон значень завеликий для сортування підрахунком (${minimum}…${maximum})`,
+    )
+  }
+
+  return { minimum, maximum }
+}
+
 export function* countingSort(input: readonly number[]): SortGenerator {
   const array = [...input]
   const counters: Counters = { comparisons: 0, movements: 0 }
@@ -480,16 +514,16 @@ export function* countingSort(input: readonly number[]): SortGenerator {
     return
   }
 
-  const maximum = Math.max(...array)
-  const counts = new Array<number>(maximum + 1).fill(0)
+  const { minimum, maximum } = assertCountingSortInput(array)
+  const counts = Array.from({ length: maximum - minimum + 1 }, () => 0)
 
   yield snapshot(array, {
     counters,
-    message: `Будуємо таблицю частот для значень 0…${maximum}`,
+    message: `Будуємо таблицю частот для значень ${minimum}…${maximum}`,
   })
 
   for (let index = 0; index < array.length; index += 1) {
-    counts[array[index]] += 1
+    counts[array[index] - minimum] += 1
     yield snapshot(array, {
       counters,
       comparing: [index],
@@ -507,8 +541,9 @@ export function* countingSort(input: readonly number[]): SortGenerator {
   // Iterate backwards to keep the algorithm stable.
   for (let index = source.length - 1; index >= 0; index -= 1) {
     const value = source[index]
-    counts[value] -= 1
-    const position = counts[value]
+    const bucket = value - minimum
+    counts[bucket] -= 1
+    const position = counts[bucket]
 
     array[position] = value
     counters.movements += 1
@@ -644,8 +679,29 @@ export function runSort(
 ): SortSnapshot[] {
   const snapshots: SortSnapshot[] = []
 
-  for (const frame of ALGORITHM_IMPLEMENTATIONS[algorithm](values)) {
-    snapshots.push(frame)
+  try {
+    for (const frame of ALGORITHM_IMPLEMENTATIONS[algorithm](values)) {
+      snapshots.push(frame)
+    }
+  } catch (error) {
+    // Invalid input must never crash the React tree. `countingSort` (and any
+    // future validating algorithm) throws a descriptive `Error`; surface it as
+    // a single frame instead of a corrupt or partially-sorted history.
+    return [
+      {
+        array: [...values],
+        comparing: [],
+        swapped: [],
+        sorted: [],
+        comparisons: 0,
+        movements: 0,
+        message:
+          error instanceof Error && error.message.trim() !== ''
+            ? error.message
+            : 'Не вдалося відсортувати масив: некоректні вхідні дані',
+        done: false,
+      },
+    ]
   }
 
   if (snapshots.length === 0) {

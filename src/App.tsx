@@ -226,11 +226,11 @@ export default function App() {
                             {getSeasonButtonLabel(seasonSetting, resolvedSeason)}
                         </button>
                         <button
-                         onClick={() => setActiveTab('teacher')}
-                         className={tabClassName(activeTab === 'teacher')}
-            >
-                Кабінет викладача
-            </button>
+                            onClick={() => setActiveTab('teacher')}
+                            className={tabClassName(activeTab === 'teacher')}
+                        >
+                            Кабінет викладача
+                        </button>
                     </div>
                 </header>
 
