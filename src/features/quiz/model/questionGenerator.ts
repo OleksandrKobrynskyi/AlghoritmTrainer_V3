@@ -35,6 +35,43 @@ const OPERATION_LABELS: Record<SortingOperation, string> = {
 export interface GenerateSortingQuestionsOptions {
   maxQuestions?: number
   includeOperationQuestions?: boolean
+  /**
+   * Optional stable discriminator (for example the payload's index) that keeps
+   * identical payloads from producing colliding generated question ids.
+   */
+  payloadDiscriminator?: string | number
+}
+
+function createPayloadFingerprint(payload: SortingStatePayload): string {
+  const metadata = payload.metadata
+    ? Object.keys(payload.metadata)
+        .sort()
+        .map((key) => `${key}=${String(payload.metadata?.[key])}`)
+        .join(',')
+    : ''
+  const steps = payload.steps
+    .map((step) =>
+      [
+        step.stepIndex,
+        serializeNumberArray(step.array),
+        serializeNumberArray(step.activeIndices),
+        serializeNumberArray(step.sortedIndices),
+        step.operation,
+        step.description,
+      ].join('|'),
+    )
+    .join(';')
+
+  return hashString(
+    [
+      payload.algorithm,
+      payload.algorithmLabel,
+      payload.currentStepIndex ?? '',
+      (payload.pseudocode ?? []).join('\n'),
+      metadata,
+      steps,
+    ].join('::'),
+  ).toString(36)
 }
 
 function createContext(
@@ -187,8 +224,9 @@ function createArrayOutcomeQuestion(
   payload: SortingStatePayload,
   currentStep: SortingStep,
   nextStep: SortingStep,
+  payloadKey: string,
 ): QuizQuestion {
-  const id = `gen-${payload.algorithm}-array-${currentStep.stepIndex}`
+  const id = `gen-${payload.algorithm}-${payloadKey}-array-${currentStep.stepIndex}`
   const actionPhrase =
     nextStep.operation === 'swap'
       ? 'наступного обміну'
@@ -223,8 +261,9 @@ function createOperationQuestion(
   payload: SortingStatePayload,
   currentStep: SortingStep,
   nextStep: SortingStep,
+  payloadKey: string,
 ): QuizQuestion {
-  const id = `gen-${payload.algorithm}-operation-${currentStep.stepIndex}`
+  const id = `gen-${payload.algorithm}-${payloadKey}-operation-${currentStep.stepIndex}`
   const correctOperation = nextStep.operation
   const decoyOperations = shuffleWithSeed(
     OPERATION_ORDER.filter((operation) => operation !== correctOperation),
@@ -273,6 +312,12 @@ export function generateSortingQuestions(
     return []
   }
 
+  const fingerprint = createPayloadFingerprint(payload)
+  const payloadKey =
+    options.payloadDiscriminator === undefined
+      ? fingerprint
+      : `${String(options.payloadDiscriminator)}-${fingerprint}`
+
   const questions: QuizQuestion[] = []
 
   for (let index = 0; index < payload.steps.length - 1; index += 1) {
@@ -285,12 +330,14 @@ export function generateSortingQuestions(
 
     if (!arraysEqual(currentStep.array, nextStep.array)) {
       questions.push(
-        createArrayOutcomeQuestion(payload, currentStep, nextStep),
+        createArrayOutcomeQuestion(payload, currentStep, nextStep, payloadKey),
       )
     }
 
     if (includeOperationQuestions) {
-      questions.push(createOperationQuestion(payload, currentStep, nextStep))
+      questions.push(
+        createOperationQuestion(payload, currentStep, nextStep, payloadKey),
+      )
     }
   }
 

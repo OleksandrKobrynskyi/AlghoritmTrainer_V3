@@ -5,6 +5,63 @@ export const QUIZ_STORAGE_KEYS = {
   session: 'algolab.quiz.session.v1',
 } as const
 
+const EMITTED_RESULT_KEY_PREFIX = 'algolab.quiz.emitted.v1.'
+
+function isBrowser(): boolean {
+  return typeof window !== 'undefined'
+}
+
+function getEmittedResultKey(runId: string): string {
+  return `${EMITTED_RESULT_KEY_PREFIX}${runId}`
+}
+
+export function hasQuizResultBeenEmitted(runId: string): boolean {
+  if (!isBrowser()) {
+    return false
+  }
+
+  try {
+    return window.localStorage.getItem(getEmittedResultKey(runId)) === '1'
+  } catch {
+    return false
+  }
+}
+
+export function markQuizResultEmitted(runId: string): void {
+  if (!isBrowser()) {
+    return
+  }
+
+  try {
+    window.localStorage.setItem(getEmittedResultKey(runId), '1')
+  } catch {
+    // Storage can be unavailable (private mode, quota); the in-memory ref still
+    // prevents duplicate onFinish calls in the current tab.
+  }
+}
+
+export function clearEmittedQuizResults(): void {
+  if (!isBrowser()) {
+    return
+  }
+
+  try {
+    const keys: string[] = []
+
+    for (let index = 0; index < window.localStorage.length; index += 1) {
+      const key = window.localStorage.key(index)
+
+      if (key !== null && key.startsWith(EMITTED_RESULT_KEY_PREFIX)) {
+        keys.push(key)
+      }
+    }
+
+    keys.forEach((key) => window.localStorage.removeItem(key))
+  } catch {
+    // Ignore storage access errors.
+  }
+}
+
 export function createEmptyProgress(): QuizProgress {
   return {
     bestScore: 0,
