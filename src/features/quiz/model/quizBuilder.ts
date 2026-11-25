@@ -69,9 +69,10 @@ export function buildQuiz(
   const generated =
     mode === 'theory'
       ? []
-      : payloads.flatMap((payload) =>
+      : payloads.flatMap((payload, payloadIndex) =>
           generateSortingQuestions(payload, {
             maxQuestions: questionsPerAlgorithm,
+            payloadDiscriminator: payloadIndex,
           }),
         )
 

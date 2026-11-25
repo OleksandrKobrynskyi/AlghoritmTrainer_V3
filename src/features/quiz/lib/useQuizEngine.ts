@@ -11,6 +11,7 @@ import type {
 } from '../model/types'
 import { evaluateAnswer } from './answerValidation'
 import {
+  clearEmittedQuizResults,
   createEmptyProgress,
   createIdleSession,
   isQuizProgress,
@@ -219,16 +220,19 @@ export function useQuizEngine(
   }, [setSession, setStats])
 
   const restartQuiz = useCallback(() => {
+    clearEmittedQuizResults()
     startQuiz(sessionRef.current.mode)
   }, [startQuiz])
 
   const quitSession = useCallback(() => {
+    clearEmittedQuizResults()
     const idleSession = createIdleSession()
     sessionRef.current = idleSession
     setSession(idleSession)
   }, [setSession])
 
   const resetProgress = useCallback(() => {
+    clearEmittedQuizResults()
     const idleSession = createIdleSession()
     sessionRef.current = idleSession
     setSession(idleSession)
